@@ -4,13 +4,17 @@ Application web statique pour calculer les apports nutritionnels d'un journal al
 
 **Site en ligne :** [https://irolup.github.io/journeaux-alimentaires/](https://irolup.github.io/journeaux-alimentaires/)
 
+Pas de backend, pas de base de données, pas de connexion — hébergé sur **GitHub Pages**.
+
 ## Fonctionnalités
 
 - Recherche d'aliments dans le FCÉN (~6000 aliments)
 - Saisie de portions en **grammes** ou en **mesures** (tasse, ml, 50g, etc.)
 - Calcul des nutriments par entrée (protéines, glucides, lipides, minéraux, vitamines)
+- Journal par **jour** (1 à 3), aligné sur le modèle papier
+- **Import PDF** du journal alimentaire avec association semi-automatique FCÉN
 - **Totaux journaliers**
-- **Résumé multi-jours** avec période personnalisable (nombre de jours)
+- **Résumé des 3 jours** du journal
 - Colonnes configurables dans le tableau de résumé
 - **Export CSV** (résumé et détails des totaux par jour)
 - Données du journal sauvegardées localement dans le navigateur (`localStorage`)
@@ -46,6 +50,7 @@ Le déploiement est automatisé par GitHub Actions (`.github/workflows/deploy.ym
 1. **Settings → Actions → General** : autoriser les workflows et permissions **Read and write**
 2. **Settings → Pages** : la source est gérée par le workflow (ne pas utiliser les modèles Jekyll / Static HTML)
 3. Pousser sur `main` — ou lancer manuellement **Actions → Deploy to GitHub Pages → Run workflow**
+
 
 ## Calcul des nutriments
 

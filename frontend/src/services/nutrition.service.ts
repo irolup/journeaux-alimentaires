@@ -64,7 +64,13 @@ export async function computeEntryNutrients(
     factor = computeScaleFactor(quantity, unitType);
   } else {
     const servingSizes = await getServingSizes(foodCode, lang);
-    const measure = servingSizes.find((size) => size.measure_name === measureName);
+    const normalizedMeasure = measureName?.trim().toLowerCase() ?? "";
+    const measure =
+      servingSizes.find((size) => size.measure_name === measureName) ??
+      servingSizes.find(
+        (size) => size.measure_name.trim().toLowerCase() === normalizedMeasure
+      ) ??
+      (servingSizes.length === 1 ? servingSizes[0] : undefined);
 
     if (!measure) {
       throw new Error(`Mesure introuvable: ${measureName ?? "non spécifiée"}`);

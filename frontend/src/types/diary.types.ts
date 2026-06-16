@@ -5,7 +5,8 @@ export type MealType = "BREAKFAST" | "LUNCH" | "DINNER" | "SNACK";
 
 export interface DiaryEntry {
   id: string;
-  date: string;
+  /** Jour du journal alimentaire (1, 2 ou 3). */
+  dayNumber: number | null;
   foodCode: number;
   foodName: string;
   quantity: number;
@@ -20,7 +21,7 @@ export interface DiaryEntryWithNutrients extends DiaryEntry {
 }
 
 export interface NewDiaryEntry {
-  date: string;
+  dayNumber: number | null;
   foodCode: number;
   foodName: string;
   quantity: number;
@@ -30,7 +31,8 @@ export interface NewDiaryEntry {
 }
 
 export interface DailySummary {
-  date: string;
+  dayNumber: number;
+  dayLabel: string;
   entryCount: number;
   totals: ComputedNutrients;
 }

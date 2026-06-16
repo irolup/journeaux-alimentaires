@@ -5,21 +5,39 @@ import type {
   NewDiaryEntry,
 } from "../types/diary.types";
 import { computeEntryNutrients, sumNutrients } from "./nutrition.service";
+import { MAX_JOURNAL_DAYS } from "./pdf-parser.service";
 
 const STORAGE_KEY = "journeaux-alimentaires-entries";
 
-function uniqueSortedDates(entries: DiaryEntry[]): string[] {
-  const set = new Set<string>();
-  for (const entry of entries) {
-    set.add(entry.date);
-  }
-  return Array.from(set).sort((a, b) => b.localeCompare(a));
+type LegacyDiaryEntry = Partial<DiaryEntry> & { date?: string | null };
+
+function normalizeDayNumber(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const day = Math.floor(value);
+  if (day < 1 || day > MAX_JOURNAL_DAYS) return null;
+  return day;
+}
+
+function migrateEntry(raw: LegacyDiaryEntry): DiaryEntry {
+  const dayNumber = normalizeDayNumber(raw.dayNumber);
+  return {
+    id: raw.id ?? crypto.randomUUID(),
+    dayNumber,
+    foodCode: raw.foodCode ?? 0,
+    foodName: raw.foodName ?? "",
+    quantity: raw.quantity ?? 0,
+    unitType: raw.unitType ?? "GRAMS",
+    measureName: raw.measureName,
+    mealType: raw.mealType,
+    createdAt: raw.createdAt ?? new Date().toISOString(),
+  };
 }
 
 function loadAllEntries(): DiaryEntry[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as DiaryEntry[]) : [];
+    if (!raw) return [];
+    return (JSON.parse(raw) as LegacyDiaryEntry[]).map(migrateEntry);
   } catch {
     return [];
   }
@@ -29,30 +47,48 @@ function saveAllEntries(entries: DiaryEntry[]): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
 }
 
+function dayLabel(dayNumber: number): string {
+  return `Jour ${dayNumber}`;
+}
+
 export function getAllDiaryEntriesRaw(): DiaryEntry[] {
   return loadAllEntries();
 }
 
-export async function getDiaryEntries(date: string): Promise<DiaryEntryWithNutrients[]> {
-  const entries = loadAllEntries()
-    .filter((entry) => entry.date === date)
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-
-  return Promise.all(
-    entries.map(async (entry) => ({
-      ...entry,
-      nutrients: await computeEntryNutrients(
-        entry.foodCode,
-        entry.quantity,
-        entry.unitType,
-        entry.measureName
-      ),
-    }))
-  );
+export function getJournalDayNumbers(): number[] {
+  return Array.from({ length: MAX_JOURNAL_DAYS }, (_, index) => index + 1);
 }
 
-export async function getDiarySummary(date: string): Promise<DailySummary> {
-  const entries = loadAllEntries().filter((entry) => entry.date === date);
+export function getJournalDaysWithData(): number[] {
+  const set = new Set<number>();
+  for (const entry of loadAllEntries()) {
+    if (entry.dayNumber != null) set.add(entry.dayNumber);
+  }
+  return Array.from(set).sort((a, b) => a - b);
+}
+
+async function withNutrients(entry: DiaryEntry): Promise<DiaryEntryWithNutrients> {
+  return {
+    ...entry,
+    nutrients: await computeEntryNutrients(
+      entry.foodCode,
+      entry.quantity,
+      entry.unitType,
+      entry.measureName
+    ),
+  };
+}
+
+export async function getDiaryEntries(dayNumber: number): Promise<DiaryEntryWithNutrients[]> {
+  const entries = loadAllEntries()
+    .filter((entry) => entry.dayNumber === dayNumber)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+  return Promise.all(entries.map(withNutrients));
+}
+
+export async function getDiarySummary(dayNumber: number): Promise<DailySummary> {
+  const entries = loadAllEntries().filter((entry) => entry.dayNumber === dayNumber);
 
   const nutrientsList = await Promise.all(
     entries.map((entry) =>
@@ -66,28 +102,25 @@ export async function getDiarySummary(date: string): Promise<DailySummary> {
   );
 
   return {
-    date,
+    dayNumber,
+    dayLabel: dayLabel(dayNumber),
     entryCount: entries.length,
     totals: sumNutrients(nutrientsList),
   };
 }
 
-export function getDiaryDates(limit = 7): string[] {
-  const entries = loadAllEntries();
-  return uniqueSortedDates(entries).slice(0, limit);
-}
-
 export async function getMultiDaySummaries(
-  dates: string[]
+  dayNumbers: number[] = getJournalDayNumbers()
 ): Promise<{ summaries: DailySummary[]; totals: DailySummary }> {
-  const summaries = await Promise.all(dates.map((date) => getDiarySummary(date)));
+  const summaries = await Promise.all(dayNumbers.map((dayNumber) => getDiarySummary(dayNumber)));
   const allComputed = summaries.map((summary) => summary.totals);
 
   return {
-    summaries: summaries.sort((a, b) => b.date.localeCompare(a.date)),
+    summaries: summaries.sort((a, b) => a.dayNumber - b.dayNumber),
     totals: {
-      date: "TOTAL",
-      entryCount: summaries.reduce((acc, s) => acc + s.entryCount, 0),
+      dayNumber: 0,
+      dayLabel: "Total",
+      entryCount: summaries.reduce((acc, summary) => acc + summary.entryCount, 0),
       totals: sumNutrients(allComputed),
     },
   };
@@ -96,7 +129,7 @@ export async function getMultiDaySummaries(
 export async function addDiaryEntry(data: NewDiaryEntry): Promise<DiaryEntryWithNutrients> {
   const entry: DiaryEntry = {
     id: crypto.randomUUID(),
-    date: data.date,
+    dayNumber: normalizeDayNumber(data.dayNumber),
     foodCode: data.foodCode,
     foodName: data.foodName,
     quantity: data.quantity,
@@ -110,17 +143,36 @@ export async function addDiaryEntry(data: NewDiaryEntry): Promise<DiaryEntryWith
   entries.push(entry);
   saveAllEntries(entries);
 
-  const nutrients = await computeEntryNutrients(
-    entry.foodCode,
-    entry.quantity,
-    entry.unitType,
-    entry.measureName
-  );
-
-  return { ...entry, nutrients };
+  return withNutrients(entry);
 }
 
 export function deleteDiaryEntry(id: string): void {
   const entries = loadAllEntries().filter((entry) => entry.id !== id);
   saveAllEntries(entries);
+}
+
+export function clearAllDiaryEntries(): void {
+  saveAllEntries([]);
+}
+
+export async function getEntriesWithoutDay(): Promise<DiaryEntryWithNutrients[]> {
+  const entries = loadAllEntries()
+    .filter((entry) => entry.dayNumber == null)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+  return Promise.all(entries.map(withNutrients));
+}
+
+export async function updateDiaryEntryDayNumber(
+  id: string,
+  dayNumber: number | null
+): Promise<DiaryEntryWithNutrients | null> {
+  const entries = loadAllEntries();
+  const index = entries.findIndex((entry) => entry.id === id);
+  if (index === -1) return null;
+
+  entries[index] = { ...entries[index], dayNumber: normalizeDayNumber(dayNumber) };
+  saveAllEntries(entries);
+
+  return withNutrients(entries[index]);
 }

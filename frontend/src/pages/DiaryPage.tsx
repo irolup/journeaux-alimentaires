@@ -1,13 +1,19 @@
 import { useEffect, useState } from "react";
+import PdfImportPanel from "../components/PdfImportPanel";
 import { searchFoods, getServingSizes } from "../services/cnf.service";
 import {
   addDiaryEntry,
+  clearAllDiaryEntries,
   deleteDiaryEntry,
+  getAllDiaryEntriesRaw,
   getDiaryEntries,
-  getDiaryDates,
   getDiarySummary,
+  getEntriesWithoutDay,
+  getJournalDayNumbers,
   getMultiDaySummaries,
+  updateDiaryEntryDayNumber,
 } from "../services/diary.service";
+import { MAX_JOURNAL_DAYS } from "../services/pdf-parser.service";
 import {
   MACRO_NUTRIENT_IDS,
   MINERAL_NUTRIENT_IDS,
@@ -34,10 +40,6 @@ const SUMMARY_COLUMNS: { key: SummaryColumnKey; label: string }[] = [
   { key: "fat", label: "Lipides (g)" },
   { key: "fibre", label: "Fibres (g)" },
 ];
-
-function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
-}
 
 function escapeCsv(value: unknown): string {
   const stringValue = String(value ?? "");
@@ -92,13 +94,12 @@ function NutrientTable({
 }
 
 export default function DiaryPage() {
-  const [date, setDate] = useState(todayIso());
+  const [selectedDay, setSelectedDay] = useState(1);
   const [entries, setEntries] = useState<DiaryEntryWithNutrients[]>([]);
   const [summary, setSummary] = useState<DailySummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const [multiDayLimit, setMultiDayLimit] = useState(7);
   const [multiDaySummaries, setMultiDaySummaries] = useState<DailySummary[]>([]);
   const [multiDayTotals, setMultiDayTotals] = useState<DailySummary | null>(null);
   const [showColumnMenu, setShowColumnMenu] = useState(false);
@@ -119,14 +120,26 @@ export default function DiaryPage() {
   const [measureName, setMeasureName] = useState("");
   const [mealType, setMealType] = useState<string>("");
   const [adding, setAdding] = useState(false);
+  const [unassignedEntries, setUnassignedEntries] = useState<DiaryEntryWithNutrients[]>([]);
+  const [pendingDays, setPendingDays] = useState<Record<string, number>>({});
+  const [assigningDayId, setAssigningDayId] = useState<string | null>(null);
 
-  async function loadDiary(selectedDate: string) {
+  async function loadUnassigned() {
+    try {
+      const unassigned = await getEntriesWithoutDay();
+      setUnassignedEntries(unassigned);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur de chargement des entrées sans jour");
+    }
+  }
+
+  async function loadDiary(dayNumber: number) {
     setLoading(true);
     setError("");
     try {
       const [diaryEntries, dailySummary] = await Promise.all([
-        getDiaryEntries(selectedDate),
-        getDiarySummary(selectedDate),
+        getDiaryEntries(dayNumber),
+        getDiarySummary(dayNumber),
       ]);
       setEntries(diaryEntries);
       setSummary(dailySummary);
@@ -139,13 +152,7 @@ export default function DiaryPage() {
 
   async function loadMultiDay() {
     try {
-      const dates = getDiaryDates(multiDayLimit);
-      if (dates.length === 0) {
-        setMultiDaySummaries([]);
-        setMultiDayTotals(null);
-        return;
-      }
-      const { summaries, totals } = await getMultiDaySummaries(dates);
+      const { summaries, totals } = await getMultiDaySummaries(getJournalDayNumbers());
       setMultiDaySummaries(summaries);
       setMultiDayTotals(totals);
     } catch (err) {
@@ -154,12 +161,13 @@ export default function DiaryPage() {
   }
 
   useEffect(() => {
-    loadDiary(date);
-  }, [date]);
+    loadDiary(selectedDay);
+    loadUnassigned();
+  }, [selectedDay]);
 
   useEffect(() => {
     loadMultiDay();
-  }, [multiDayLimit]);
+  }, []);
 
   useEffect(() => {
     if (selectedFood && searchQuery === selectedFood.food_description) {
@@ -203,7 +211,7 @@ export default function DiaryPage() {
 
     try {
       await addDiaryEntry({
-        date,
+        dayNumber: selectedDay,
         foodCode: selectedFood.food_code,
         foodName: selectedFood.food_description,
         quantity: Number(quantity),
@@ -217,7 +225,7 @@ export default function DiaryPage() {
       setQuantity("1");
       setUnitType("GRAMS");
       setMealType("");
-      await loadDiary(date);
+      await loadDiary(selectedDay);
       await loadMultiDay();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur lors de l'ajout");
@@ -229,10 +237,58 @@ export default function DiaryPage() {
   async function handleDelete(id: string) {
     try {
       deleteDiaryEntry(id);
-      await loadDiary(date);
+      await loadDiary(selectedDay);
+      await loadUnassigned();
       await loadMultiDay();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur de suppression");
+    }
+  }
+
+  async function handleClearAll() {
+    const count = getAllDiaryEntriesRaw().length;
+    if (count === 0) return;
+
+    const confirmed = window.confirm(
+      `Supprimer les ${count} entrée${count > 1 ? "s" : ""} du journal ? Cette action est irréversible.`
+    );
+    if (!confirmed) return;
+
+    try {
+      clearAllDiaryEntries();
+      setPendingDays({});
+      await loadDiary(selectedDay);
+      await loadUnassigned();
+      await loadMultiDay();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur lors de la suppression");
+    }
+  }
+
+  async function handleAssignDay(entryId: string) {
+    const targetDay = pendingDays[entryId];
+    if (!targetDay) {
+      setError("Choisissez un jour (1, 2 ou 3) avant d'assigner.");
+      return;
+    }
+
+    setAssigningDayId(entryId);
+    setError("");
+
+    try {
+      await updateDiaryEntryDayNumber(entryId, targetDay);
+      setPendingDays((current) => {
+        const next = { ...current };
+        delete next[entryId];
+        return next;
+      });
+      await loadDiary(selectedDay);
+      await loadUnassigned();
+      await loadMultiDay();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur lors de l'assignation du jour");
+    } finally {
+      setAssigningDayId(null);
     }
   }
 
@@ -261,12 +317,12 @@ export default function DiaryPage() {
     if (multiDaySummaries.length === 0 || !multiDayTotals) return;
 
     const separator = ";";
-    const header = ["Date", ...selectedSummaryColumns.map((key) => SUMMARY_COLUMNS.find((c) => c.key === key)?.label ?? key)];
+    const header = ["Jour", ...selectedSummaryColumns.map((key) => SUMMARY_COLUMNS.find((c) => c.key === key)?.label ?? key)];
 
     const rows = [
       header,
       ...multiDaySummaries.map((s) => [
-        s.date,
+        s.dayLabel,
         ...selectedSummaryColumns.map((key) => getRowValue(s, key)),
       ]),
       [
@@ -279,21 +335,16 @@ export default function DiaryPage() {
       .map((row) => row.map(escapeCsv).join(separator))
       .join("\n");
 
-    const dates = getDiaryDates(multiDayLimit);
-    const oldest = dates[dates.length - 1] ?? todayIso();
-    const newest = dates[0] ?? todayIso();
-    downloadCsv(`resume-${dates.length}j-${oldest}-a-${newest}.csv`, csv);
+    downloadCsv(`resume-jours-1-${MAX_JOURNAL_DAYS}.csv`, csv);
   }
 
   async function exportDetailsCsv() {
-    const dates = getDiaryDates(multiDayLimit);
-    if (dates.length === 0) return;
-
+    const dayNumbers = getJournalDayNumbers();
     const separator = ";";
-    const header = ["Date", "Type", "Nutriment", "Valeur", "Unité", "ID nutriment", "Nombre d'aliments"];
+    const header = ["Jour", "Type", "Nutriment", "Valeur", "Unité", "ID nutriment", "Nombre d'aliments"];
     const rows: Array<Array<string | number>> = [header];
 
-    const summaries = await Promise.all(dates.map((d) => getDiarySummary(d)));
+    const summaries = await Promise.all(dayNumbers.map((dayNumber) => getDiarySummary(dayNumber)));
 
     function nutrientType(nutrientNameId: number): string {
       if (MACRO_NUTRIENT_IDS.has(nutrientNameId)) return "Macro";
@@ -302,10 +353,10 @@ export default function DiaryPage() {
       return "Autre";
     }
 
-    for (const s of summaries.sort((a, b) => b.date.localeCompare(a.date))) {
+    for (const s of summaries.sort((a, b) => a.dayNumber - b.dayNumber)) {
       for (const nutrient of s.totals.all) {
         rows.push([
-          s.date,
+          s.dayLabel,
           nutrientType(nutrient.nutrientNameId),
           nutrient.name,
           nutrient.value,
@@ -320,9 +371,7 @@ export default function DiaryPage() {
       .map((row) => row.map(escapeCsv).join(separator))
       .join("\n");
 
-    const oldest = dates[dates.length - 1];
-    const newest = dates[0];
-    downloadCsv(`details-totaux-${dates.length}j-${oldest}-a-${newest}.csv`, csv);
+    downloadCsv(`details-totaux-jours-1-${MAX_JOURNAL_DAYS}.csv`, csv);
   }
 
   return (
@@ -332,16 +381,36 @@ export default function DiaryPage() {
           <h1>Journal alimentaire</h1>
           <p className="subtitle">Calculez vos macronutriments, minéraux et vitamines</p>
         </div>
-        <label className="date-picker">
-          Date
-          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-        </label>
+        <div className="page-header-actions">
+          <label className="day-picker">
+            Jour
+            <select
+              value={selectedDay}
+              onChange={(e) => setSelectedDay(Number(e.target.value))}
+            >
+              {getJournalDayNumbers().map((day) => (
+                <option key={day} value={day}>
+                  Jour {day}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="delete-btn clear-all-btn"
+            onClick={handleClearAll}
+            disabled={getAllDiaryEntriesRaw().length === 0}
+            title="Supprime toutes les entrées enregistrées"
+          >
+            Tout supprimer
+          </button>
+        </div>
       </header>
 
       {error && <p className="error banner">{error}</p>}
 
       <section className="card">
-        <h2>Ajouter un aliment</h2>
+        <h2>Ajouter un aliment (Jour {selectedDay})</h2>
         <div className="form-grid">
           <label>
             Rechercher un aliment (FCÉN)
@@ -427,13 +496,76 @@ export default function DiaryPage() {
         </div>
       </section>
 
+      <PdfImportPanel
+        onImported={async () => {
+          await loadDiary(selectedDay);
+          await loadUnassigned();
+          await loadMultiDay();
+        }}
+      />
+
+      {unassignedEntries.length > 0 && (
+        <section className="card undated-entries-card">
+          <h2>Entrées sans jour ({unassignedEntries.length})</h2>
+          <p className="subtitle">
+            Ces aliments n&apos;ont pas de jour assigné. Choisissez Jour 1, 2 ou 3 pour les inclure
+            dans le journal.
+          </p>
+          <ul className="entry-list">
+            {unassignedEntries.map((entry) => (
+              <li key={entry.id} className="entry-item undated-entry-item">
+                <div className="entry-header">
+                  <strong>{entry.foodName}</strong>
+                  <button type="button" className="delete-btn" onClick={() => handleDelete(entry.id)}>
+                    Supprimer
+                  </button>
+                </div>
+                <p className="entry-meta">
+                  {entry.quantity}{" "}
+                  {entry.unitType === "GRAMS" ? "g" : entry.measureName}
+                  {entry.mealType && ` · ${MEAL_LABELS[entry.mealType]}`}
+                </p>
+                <div className="undated-assign-row">
+                  <label className="inline-label">
+                    Jour
+                    <select
+                      value={pendingDays[entry.id] ?? ""}
+                      onChange={(e) =>
+                        setPendingDays((current) => ({
+                          ...current,
+                          [entry.id]: Number(e.target.value),
+                        }))
+                      }
+                    >
+                      <option value="">—</option>
+                      {getJournalDayNumbers().map((day) => (
+                        <option key={day} value={day}>
+                          Jour {day}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => handleAssignDay(entry.id)}
+                    disabled={assigningDayId === entry.id}
+                  >
+                    {assigningDayId === entry.id ? "Assignation…" : "Assigner le jour"}
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       <div className="diary-grid">
         <section className="card">
-          <h2>Aliments du jour ({entries.length})</h2>
+          <h2>Aliments du Jour {selectedDay} ({entries.length})</h2>
           {loading ? (
             <p>Chargement...</p>
           ) : entries.length === 0 ? (
-            <p className="empty">Aucun aliment enregistré pour cette date.</p>
+            <p className="empty">Aucun aliment enregistré pour le Jour {selectedDay}.</p>
           ) : (
             <ul className="entry-list">
               {entries.map((entry) => (
@@ -463,7 +595,7 @@ export default function DiaryPage() {
         </section>
 
         <section className="card summary-card">
-          <h2>Totaux de la journée</h2>
+          <h2>Totaux du Jour {selectedDay}</h2>
           {!summary || summary.entryCount === 0 ? (
             <p className="empty">Ajoutez des aliments pour voir les totaux.</p>
           ) : (
@@ -479,26 +611,10 @@ export default function DiaryPage() {
       <section className="card">
         <div className="multi-header">
           <div>
-            <h2>Résumé multi-jours</h2>
-            <p className="subtitle">Totaux par jour + total sur la période</p>
+            <h2>Résumé des 3 jours</h2>
+            <p className="subtitle">Totaux par jour (Jour 1, 2 et 3) + total général</p>
           </div>
           <div className="multi-controls">
-            <label className="inline-label period-input">
-              Période (jours)
-              <input
-                type="number"
-                min={1}
-                max={365}
-                value={multiDayLimit}
-                onChange={(e) => {
-                  const value = Number(e.target.value);
-                  if (!Number.isNaN(value) && value >= 1) {
-                    setMultiDayLimit(Math.min(365, Math.floor(value)));
-                  }
-                }}
-              />
-            </label>
-
             <div className="column-menu">
               <button
                 type="button"
@@ -523,46 +639,35 @@ export default function DiaryPage() {
               )}
             </div>
 
-            {(() => {
-              const dates = getDiaryDates(multiDayLimit);
-              const rangeLabel =
-                dates.length > 0 ? `${dates.length} jours (${dates[dates.length - 1]} → ${dates[0]})` : `${multiDayLimit} jours`;
-
-              return (
-                <>
-                  <button
+            <button
               type="button"
               className="column-menu-btn"
               onClick={exportSummaryCsv}
               disabled={multiDaySummaries.length === 0 || !multiDayTotals}
-              title={`Exporte le tableau « Résumé multi-jours » avec uniquement les colonnes cochées.\nPériode: ${rangeLabel}`}
+              title="Exporte le tableau résumé pour les jours 1 à 3"
             >
-              Exporter résumé CSV ({dates.length || multiDayLimit} j)
+              Exporter résumé CSV
             </button>
 
-                  <button
+            <button
               type="button"
               className="column-menu-btn"
               onClick={exportDetailsCsv}
-              disabled={dates.length === 0}
-              title={`Exporte tous les nutriments des « Totaux de la journée » pour chaque jour de la période (format ligne par nutriment).\nPériode: ${rangeLabel}`}
+              title="Exporte tous les nutriments pour chaque jour (1 à 3)"
             >
-              Exporter détails CSV ({dates.length || multiDayLimit} j)
+              Exporter détails CSV
             </button>
-                </>
-              );
-            })()}
           </div>
         </div>
 
         {multiDaySummaries.length === 0 || !multiDayTotals ? (
-          <p className="empty">Aucune donnée sur cette période.</p>
+          <p className="empty">Aucune donnée sur les 3 jours.</p>
         ) : (
           <div className="multi-table-wrap">
             <table className="multi-table">
               <thead>
                 <tr>
-                  <th>Date</th>
+                  <th>Jour</th>
                   {selectedSummaryColumns.map((key) => (
                     <th key={key}>
                       {SUMMARY_COLUMNS.find((c) => c.key === key)?.label ?? key}
@@ -572,10 +677,10 @@ export default function DiaryPage() {
               </thead>
               <tbody>
                 {multiDaySummaries.map((s) => (
-                  <tr key={s.date}>
-                    <td>{s.date}</td>
+                  <tr key={s.dayNumber}>
+                    <td>{s.dayLabel}</td>
                     {selectedSummaryColumns.map((key) => (
-                      <td key={`${s.date}-${key}`}>{getRowValue(s, key)}</td>
+                      <td key={`${s.dayNumber}-${key}`}>{getRowValue(s, key)}</td>
                     ))}
                   </tr>
                 ))}
