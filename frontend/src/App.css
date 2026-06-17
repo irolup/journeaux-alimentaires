@@ -409,6 +409,8 @@ th {
 .pdf-cnf-search input[type="text"] {
   width: 100%;
   min-width: 140px;
+  background: var(--bg);
+  color: var(--text-h);
 }
 
 .pdf-food-results {
@@ -417,8 +419,10 @@ th {
   left: 0;
   right: 0;
   margin: 0.25rem 0 0;
-  background: var(--surface, #fff);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  background: var(--bg);
+  color: var(--text-h);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
 }
 
 .pdf-cnf-selected {
